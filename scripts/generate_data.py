@@ -14,8 +14,11 @@ GEOJSON_FILE = REPO_ROOT / 'neighborhoods.geojson'
 OUTPUT_JSON  = REPO_ROOT / 'public' / 'data.json'
 GRID_SIZE    = 100
 MIN_TEMP, MAX_TEMP = 50, 70
-DEFAULT_TEMP = 55.0
 PADDING      = 1.15   # 15% padding around SF
+# Microclimates is the sole data source: ~51 neighborhood aggregates backed by
+# hundreds of PurpleAir sensors. Open-Meteo was removed because a dense sampling
+# showed it yields only ~23-24 distinct temperature values across all of SF.
+MIN_OBSERVATIONS = 10  # abort without writing if fewer neighborhoods report
 
 NAME_OVERRIDES = {
     "bayview hunters point": "bayview",
@@ -62,42 +65,47 @@ def best_key(name):
     return api_map[m[0]] if m else None
 
 def fetch_mc(key):
-    try:
-        r = requests.get(f"https://microclimates.solofounders.com/sf-weather/{key}", timeout=5)
-        if r.ok:
-            t = r.json().get('temp_f')
-            return float(t) if t is not None else None
-    except Exception: pass
-    return None
-
-def fetch_om(lat, lon):
+    """Fetch one neighborhood. Returns dict(temp_f, humidity, sensors) or None."""
     try:
         r = requests.get(
-            f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}"
-            f"&current=temperature_2m&temperature_unit=fahrenheit"
-            f"&timezone=America/Los_Angeles", timeout=8)
-        if r.ok:
-            return float(r.json()["current"]["temperature_2m"])
-    except Exception: pass
-    return None
+            f"https://microclimates.solofounders.com/sf-weather/{key}", timeout=8)
+        if not r.ok:
+            return None
+        j = r.json()
+        t = j.get('temp_f')
+        if t is None:
+            return None
+        return {
+            "temp_f": float(t),
+            "humidity": j.get("humidity"),
+            "sensors": int(j.get("sensor_count") or 0),
+        }
+    except Exception:
+        return None
 
 # ---------- Fetch ----------
-print("\nFetching temps...")
-sources, temps_list = [], []
-for _, row in gdf.iterrows():
+print("\nFetching temps (Microclimates only)...")
+obs, total_sensors = {}, 0
+for idx, row in gdf.iterrows():
     key = best_key(row[name_col])
-    t, src = None, ""
-    if key:
-        t = fetch_mc(key)
-        if t is not None: src = "mc"
-    if t is None:
-        t = fetch_om(row['lat'], row['lon'])
-        if t is not None: src = "om"
-    if t is None:
-        t, src = DEFAULT_TEMP, "default"
-    print(f"  {row[name_col]:<32} {t:>5.1f}°F ({src})")
-    temps_list.append(t); sources.append(src)
-gdf['temp_f'] = temps_list
+    o = fetch_mc(key) if key else None
+    if o:
+        obs[idx] = o
+        total_sensors += o["sensors"]
+        print(f"  {row[name_col]:<32} {o['temp_f']:>5.1f}°F  ({o['sensors']} sensors)")
+    else:
+        print(f"  {row[name_col]:<32}     —   (no data)")
+
+print(f"\nObserved {len(obs)}/{len(gdf)} neighborhoods, {total_sensors} sensors total")
+
+if len(obs) < MIN_OBSERVATIONS:
+    raise SystemExit(
+        f"\n✗ Only {len(obs)} neighborhoods returned data (need >= {MIN_OBSERVATIONS}).\n"
+        f"  The Microclimates API is degraded — refusing to overwrite {OUTPUT_JSON.name}.\n"
+        f"  Existing data was left untouched.")
+
+ok = gdf.loc[list(obs.keys())].copy()
+ok['temp_f'] = [obs[i]['temp_f'] for i in ok.index]
 
 # ---------- Square grid ----------
 sf_minx, sf_miny, sf_maxx, sf_maxy = gdf.total_bounds
@@ -118,8 +126,8 @@ grid_x, grid_y = np.meshgrid(xs, ys)
 print(f"\nGrid: {GRID_SIZE}×{GRID_SIZE} (square, {side_km:.1f} km side)")
 
 # ---------- Interpolate & mask ----------
-points = np.column_stack([gdf.lon, gdf.lat])
-values = gdf.temp_f.values
+points = np.column_stack([ok.lon, ok.lat])
+values = ok.temp_f.values
 lin = griddata(points, values, (grid_x, grid_y), method='linear')
 nn  = griddata(points, values, (grid_x, grid_y), method='nearest')
 interp = np.where(np.isnan(lin), nn, lin)
@@ -131,11 +139,14 @@ print(f"Cells inside SF: {inside.sum()} / {GRID_SIZE*GRID_SIZE}")
 
 # ---------- Labels ----------
 labels = []
-for _, row in gdf.iterrows():
+for _, row in ok.iterrows():
     i = int(np.argmin(np.abs(xs - row['lon'])))
     j = int(np.argmin(np.abs(ys - row['lat'])))
     if inside[j, i]:
-        labels.append({"r": j, "c": i, "name": row[name_col]})
+        labels.append({
+            "r": j, "c": i, "name": row[name_col],
+            "temp": round(float(row['temp_f']), 1),
+        })
 
 # ---------- Build JSON ----------
 temps_flat = []
@@ -155,9 +166,8 @@ output = {
     "temps": temps_flat,
     "labels": labels,
     "sources": {
-        "microclimate": sources.count("mc"),
-        "openmeteo":    sources.count("om"),
-        "default":      sources.count("default"),
+        "neighborhoods": len(ok),
+        "sensors": total_sensors,
     },
 }
 with open(OUTPUT_JSON, 'w') as f:
@@ -167,4 +177,4 @@ valid = [t for t in temps_flat if t is not None]
 print(f"\n✅ Wrote {OUTPUT_JSON}")
 print(f"   {len(valid)} cells, {len(labels)} labels")
 print(f"   Range: {min(valid):.1f}°F – {max(valid):.1f}°F")
-print(f"   Sources: {sources.count('mc')} mc | {sources.count('om')} om | {sources.count('default')} default")
+print(f"   Microclimates: {len(ok)} neighborhoods, {total_sensors} sensors")

@@ -197,14 +197,14 @@
         // ── Labels as SVG overlay (scales with map) ──
         const svg = document.getElementById("labels");
         const NS = "http://www.w3.org/2000/svg";
-        for (const { r, c, name } of labels) {
+        for (const { r, c, name, temp } of labels) {
           const el = document.createElementNS(NS, "text");
           el.setAttribute("x", c + 0.5);
           el.setAttribute("y", r + 0.5);
           el.textContent = name;
           // Hover info for truncated names
           const title = document.createElementNS(NS, "title");
-          title.textContent = name;
+          title.textContent = temp != null ? `${name} — ${temp}°F` : name;
           el.appendChild(title);
           svg.appendChild(el);
         }
@@ -216,10 +216,13 @@
           hour: "numeric",
           minute: "2-digit",
         });
+        const src = sources || {};
+        const srcLine = src.neighborhoods != null
+          ? `<b>Neighborhoods:</b> ${src.neighborhoods}<br>` +
+            `<b>Sensors:</b> ${src.sensors}<br>`
+          : "";
         document.getElementById("meta").innerHTML =
-          `<b>Microclimates:</b> ${sources.microclimate} stations<br>` +
-          `<b>Open-Meteo:</b> ${sources.openmeteo} stations<br>` +
-          `<b>Updated:</b> ${dt}`;
+          srcLine + `<b>Updated:</b> ${dt}`;
       })();
     </script>
   </body>
