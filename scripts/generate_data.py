@@ -5,10 +5,13 @@ from shapely import contains_xy
 from scipy.interpolate import griddata
 import json, difflib, re
 from datetime import datetime, timezone
+from pathlib import Path
 
 # ---------- CONFIG ----------
-GEOJSON_FILE = 'neighborhoods.geojson'
-OUTPUT_JSON  = 'docs/data.json'
+# Paths are anchored to the repo root so the script works from any cwd.
+REPO_ROOT    = Path(__file__).resolve().parent.parent
+GEOJSON_FILE = REPO_ROOT / 'neighborhoods.geojson'
+OUTPUT_JSON  = REPO_ROOT / 'public' / 'data.json'
 GRID_SIZE    = 100
 MIN_TEMP, MAX_TEMP = 50, 70
 DEFAULT_TEMP = 55.0
