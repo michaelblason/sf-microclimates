@@ -51,7 +51,19 @@
       .bar {
         height: 12px;
         border-radius: 4px;
-        background: linear-gradient(to right, #8b5cf6, #ffffff, #f97316);
+        /* Must match RAMP in the script: cold (indigo) → hot (deep red) */
+        background: linear-gradient(
+          to right,
+          #312e81 0%,
+          #3b82f6 14%,
+          #60a5fa 28%,
+          #67e8f9 42%,
+          #4ade80 55%,
+          #facc15 68%,
+          #f97316 80%,
+          #dc2626 90%,
+          #7f1d1d 100%
+        );
         border: 1px solid rgba(0, 0, 0, 0.06);
         margin-bottom: 4px;
       }
@@ -168,34 +180,53 @@
         }
         const { cols, rows, minTemp, maxTemp, temps, labels, sources, generated } = data;
 
-        // ── Legend ticks follow the actual data range ──
-        const loT = Number.isFinite(minTemp) ? minTemp : 50;
-        const hiT = Number.isFinite(maxTemp) ? maxTemp : 70;
-        const fmtT = (v) =>
-          (Number.isInteger(v) ? String(v) : v.toFixed(1)) + "°F";
-        document.getElementById("ticks").innerHTML =
-          `<span>${fmtT(loT)}</span>` +
-          `<span>${fmtT((loT + hiT) / 2)}</span>` +
-          `<span>${fmtT(hiT)}</span>`;
+        // ── FIXED temperature → colour scale ──────────────────────────────
+        // Anchored to San Francisco's all-time records (NOAA downtown station):
+        //    27 °F — Dec 11, 1932  (record low)
+        //   106 °F — Sep  1, 2017  (record high)
+        // Hardcoded so a given colour always means the same temperature,
+        // regardless of how today's data range shifts.
+        const SCALE_MIN = 27;
+        const SCALE_MAX = 106;
 
-        // ── Purple → White → Orange ──
+        // Deep indigo (cold) → blue → cyan → green → yellow → orange → deep red (hot)
+        const RAMP = [
+          [0.00, [49, 46, 129]],
+          [0.14, [59, 130, 246]],
+          [0.28, [96, 165, 250]],
+          [0.42, [103, 232, 249]],
+          [0.55, [74, 222, 128]],
+          [0.68, [250, 204, 21]],
+          [0.80, [249, 115, 22]],
+          [0.90, [220, 38, 38]],
+          [1.00, [127, 29, 29]],
+        ];
+
         function colorFor(t) {
           if (t == null) return [205, 224, 238]; // water
-          const r = Math.max(0, Math.min(1, (t - minTemp) / (maxTemp - minTemp)));
-          let cr, cg, cb;
-          if (r < 0.5) {
-            const k = r / 0.5; // purple → white
-            cr = 139 + k * (255 - 139);
-            cg = 92 + k * (255 - 92);
-            cb = 246 + k * (255 - 246);
-          } else {
-            const k = (r - 0.5) / 0.5; // white → orange
-            cr = 255 + k * (249 - 255);
-            cg = 255 + k * (115 - 255);
-            cb = 255 + k * (22 - 255);
+          const r = Math.max(0, Math.min(1, (t - SCALE_MIN) / (SCALE_MAX - SCALE_MIN)));
+          for (let i = 1; i < RAMP.length; i++) {
+            if (r <= RAMP[i][0]) {
+              const [p0, c0] = RAMP[i - 1];
+              const [p1, c1] = RAMP[i];
+              const k = (r - p0) / (p1 - p0);
+              return [
+                Math.round(c0[0] + k * (c1[0] - c0[0])),
+                Math.round(c0[1] + k * (c1[1] - c0[1])),
+                Math.round(c0[2] + k * (c1[2] - c0[2])),
+              ];
+            }
           }
-          return [cr | 0, cg | 0, cb | 0];
+          return RAMP[RAMP.length - 1][1];
         }
+
+        // ── Legend ticks: fixed scale ends + midpoint ──
+        const fmtT = (v) => (Number.isInteger(v) ? String(v) : v.toFixed(1)) + "°F";
+        const midT = Math.round(((SCALE_MIN + SCALE_MAX) / 2) * 10) / 10;
+        document.getElementById("ticks").innerHTML =
+          `<span>${fmtT(SCALE_MIN)}</span>` +
+          `<span>${fmtT(midT)}</span>` +
+          `<span>${fmtT(SCALE_MAX)}</span>`;
 
         // ── Render grid on canvas at native 100×100 ──
         const canvas = document.getElementById("canvas");
@@ -240,18 +271,18 @@
           const name = /open-meteo/i.test(s.provider)
             ? '<a href="https://open-meteo.com/" target="_blank" rel="noopener">Open-Meteo</a>'
             : s.provider;
-          lines.push(
-            `<b>Source:</b> ${name}` + (s.model ? ` · ${s.model}` : "")
-          );
+          lines.push(`<b>Source:</b> ${name}` + (s.model ? ` · ${s.model}` : ""));
         }
         if (s.samplePoints != null) {
           lines.push(
-            `<b>Samples:</b> ${s.samplePoints} points` +
-              (s.spacingM ? ` @ ~${s.spacingM} m` : "")
+            `<b>Samples:</b> ${s.samplePoints} points` + (s.spacingM ? ` @ ~${s.spacingM} m` : ""),
           );
         }
         if (s.elevationMin != null && s.elevationMax != null) {
           lines.push(`<b>Elevation:</b> ${s.elevationMin}–${s.elevationMax} m`);
+        }
+        if (Number.isFinite(minTemp) && Number.isFinite(maxTemp)) {
+          lines.push(`<b>Right now:</b> ${minTemp.toFixed(1)}–${maxTemp.toFixed(1)} °F`);
         }
         lines.push(`<b>Updated:</b> ${dt}`);
         meta.innerHTML = lines.join("<br>");
