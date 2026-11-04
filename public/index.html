@@ -142,7 +142,7 @@
       <h1>SF Microclimate Map</h1>
       <p class="sub">Current temperature by neighborhood</p>
       <div class="bar"></div>
-      <div class="ticks"><span>50°F</span><span>60°F</span><span>70°F</span></div>
+      <div class="ticks" id="ticks"><span>—</span><span>—</span><span>—</span></div>
       <p class="meta" id="meta">Loading…</p>
     </aside>
 
@@ -167,6 +167,16 @@
           return;
         }
         const { cols, rows, minTemp, maxTemp, temps, labels, sources, generated } = data;
+
+        // ── Legend ticks follow the actual data range ──
+        const loT = Number.isFinite(minTemp) ? minTemp : 50;
+        const hiT = Number.isFinite(maxTemp) ? maxTemp : 70;
+        const fmtT = (v) =>
+          (Number.isInteger(v) ? String(v) : v.toFixed(1)) + "°F";
+        document.getElementById("ticks").innerHTML =
+          `<span>${fmtT(loT)}</span>` +
+          `<span>${fmtT((loT + hiT) / 2)}</span>` +
+          `<span>${fmtT(hiT)}</span>`;
 
         // ── Purple → White → Orange ──
         function colorFor(t) {

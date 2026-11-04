@@ -13,8 +13,8 @@ REPO_ROOT    = Path(__file__).resolve().parent.parent
 GEOJSON_FILE = REPO_ROOT / 'neighborhoods.geojson'
 OUTPUT_JSON  = REPO_ROOT / 'public' / 'data.json'
 GRID_SIZE    = 100
-MIN_TEMP, MAX_TEMP = 50, 70
 PADDING      = 1.15   # 15% padding around SF
+MIN_RANGE_SPAN = 4.0  # widen the colour scale if the real spread is narrower
 
 # ---------- DATA SOURCE: Open-Meteo ----------
 # Open-Meteo returns gridded model surface temperature corrected to the 90 m DEM
@@ -149,12 +149,25 @@ for j in range(GRID_SIZE):
         else:
             temps_flat.append(None)
 
+valid = [t for t in temps_flat if t is not None]
+if not valid:
+    raise SystemExit(f"✗ No valid cells produced — refusing to overwrite {OUTPUT_JSON.name}.")
+
+# Colour scale adapts to the real spread, with a minimum span so mild days
+# don't get exaggerated, and integer bounds so the legend reads cleanly.
+data_lo, data_hi = min(valid), max(valid)
+pad = max(0.0, (MIN_RANGE_SPAN - (data_hi - data_lo)) / 2)
+color_min = int(np.floor(data_lo - pad))
+color_max = int(np.ceil(data_hi + pad))
+if color_max <= color_min:
+    color_max = color_min + 1
+
 output = {
     "generated": datetime.now(timezone.utc).isoformat(),
     "cols": GRID_SIZE,
     "rows": GRID_SIZE,
-    "minTemp": MIN_TEMP,
-    "maxTemp": MAX_TEMP,
+    "minTemp": color_min,
+    "maxTemp": color_max,
     "temps": temps_flat,
     "labels": labels,
     "sources": {
@@ -169,8 +182,8 @@ output = {
 with open(OUTPUT_JSON, 'w') as f:
     json.dump(output, f, separators=(',', ':'))
 
-valid = [t for t in temps_flat if t is not None]
 print(f"\n✅ Wrote {OUTPUT_JSON}")
 print(f"   {len(valid)} cells, {len(labels)} labels")
-print(f"   Range: {min(valid):.1f}°F – {max(valid):.1f}°F")
+print(f"   Data range: {data_lo:.1f}°F – {data_hi:.1f}°F "
+      f"(colour scale {color_min}–{color_max}°F)")
 print(f"   Source: Open-Meteo ({OM_MODEL}), {len(samples)} sample points")
