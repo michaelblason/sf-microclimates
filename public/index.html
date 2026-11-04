@@ -73,6 +73,14 @@
         color: #555;
         font-weight: 500;
       }
+      .meta a {
+        color: #8b5cf6;
+        text-decoration: none;
+        border-bottom: 1px solid rgba(139, 92, 246, 0.35);
+      }
+      .meta a:hover {
+        border-bottom-color: #8b5cf6;
+      }
 
       /* ── Map ── */
       .map {
@@ -216,13 +224,27 @@
           hour: "numeric",
           minute: "2-digit",
         });
-        const src = sources || {};
-        const srcLine = src.neighborhoods != null
-          ? `<b>Neighborhoods:</b> ${src.neighborhoods}<br>` +
-            `<b>Sensors:</b> ${src.sensors}<br>`
-          : "";
-        document.getElementById("meta").innerHTML =
-          srcLine + `<b>Updated:</b> ${dt}`;
+        const s = sources || {};
+        const lines = [];
+        if (s.provider) {
+          const name = /open-meteo/i.test(s.provider)
+            ? '<a href="https://open-meteo.com/" target="_blank" rel="noopener">Open-Meteo</a>'
+            : s.provider;
+          lines.push(
+            `<b>Source:</b> ${name}` + (s.model ? ` · ${s.model}` : "")
+          );
+        }
+        if (s.samplePoints != null) {
+          lines.push(
+            `<b>Samples:</b> ${s.samplePoints} points` +
+              (s.spacingM ? ` @ ~${s.spacingM} m` : "")
+          );
+        }
+        if (s.elevationMin != null && s.elevationMax != null) {
+          lines.push(`<b>Elevation:</b> ${s.elevationMin}–${s.elevationMax} m`);
+        }
+        lines.push(`<b>Updated:</b> ${dt}`);
+        meta.innerHTML = lines.join("<br>");
       })();
     </script>
   </body>

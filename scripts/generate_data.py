@@ -3,7 +3,7 @@ import numpy as np
 import geopandas as gpd
 from shapely import contains_xy
 from scipy.interpolate import griddata
-import json, difflib, re
+import json, time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -15,24 +15,16 @@ OUTPUT_JSON  = REPO_ROOT / 'public' / 'data.json'
 GRID_SIZE    = 100
 MIN_TEMP, MAX_TEMP = 50, 70
 PADDING      = 1.15   # 15% padding around SF
-# Microclimates is the sole data source: ~51 neighborhood aggregates backed by
-# hundreds of PurpleAir sensors. Open-Meteo was removed because a dense sampling
-# showed it yields only ~23-24 distinct temperature values across all of SF.
-MIN_OBSERVATIONS = 10  # abort without writing if fewer neighborhoods report
 
-NAME_OVERRIDES = {
-    "bayview hunters point": "bayview",
-    "castro/upper market":   "castro",
-    "financial district/south beach": "financial_district",
-    "sunset/parkside":       "parkside",
-    "seacliff":              "sea_cliff",
-    "haight ashbury":        "haight",
-}
-
-def normalize(s):
-    s = s.lower().strip().replace('&', ' and ')
-    s = re.sub(r'[^a-z0-9 ]+', ' ', s)
-    return re.sub(r'\s+', ' ', s).strip()
+# ---------- DATA SOURCE: Open-Meteo ----------
+# Open-Meteo returns gridded model surface temperature corrected to the 90 m DEM
+# elevation of each requested point. Measured across SF: corr(elevation, temp)
+# = -0.90 — Twin Peaks (266 m) reads ~3.5 F colder than sea level. Dense point
+# sampling therefore captures real topography-driven microclimates.
+OM_MODEL       = 'gfs_seamless'   # NOAA GFS + HRRR blend (best_match is identical here)
+OM_BATCH       = 100              # coordinates per request
+OM_SAMPLE_GRID = 20               # 20x20 = 400 sample points (~800 m spacing)
+MIN_SAMPLE_FRAC = 0.5             # abort if <50% of sample points return data
 
 # ---------- Load geometry ----------
 gdf = gpd.read_file(GEOJSON_FILE)
@@ -46,66 +38,44 @@ pts = gdf.geometry.representative_point()
 gdf['lon'], gdf['lat'] = pts.x, pts.y
 print(f"Loaded {len(gdf)} neighborhoods (name: '{name_col}')")
 
-# ---------- API keys ----------
-print("\nFetching Microclimates API keys...")
-try:
-    r = requests.get("https://microclimates.solofounders.com/neighborhoods", timeout=10)
-    api_list = r.json().get("neighborhoods", [])
-    api_map = {normalize(i["name"]): i["key"] for i in api_list}
-    print(f"  {len(api_map)} keys")
-except Exception as e:
-    print(f"  Failed: {e}")
-    api_map = {}
-
-def best_key(name):
-    n = normalize(name)
-    if n in NAME_OVERRIDES:  return NAME_OVERRIDES[n]
-    if n in api_map:         return api_map[n]
-    m = difflib.get_close_matches(n, api_map.keys(), n=1, cutoff=0.6)
-    return api_map[m[0]] if m else None
-
-def fetch_mc(key):
-    """Fetch one neighborhood. Returns dict(temp_f, humidity, sensors) or None."""
-    try:
-        r = requests.get(
-            f"https://microclimates.solofounders.com/sf-weather/{key}", timeout=8)
-        if not r.ok:
-            return None
-        j = r.json()
-        t = j.get('temp_f')
-        if t is None:
-            return None
-        return {
-            "temp_f": float(t),
-            "humidity": j.get("humidity"),
-            "sensors": int(j.get("sensor_count") or 0),
+# ---------- Sampling ----------
+# (runs after the grid extent is computed below)
+def fetch_openmeteo(coords):
+    """coords: list of (lat, lon). Returns list of dicts (lat, lon, elev, temp_f)."""
+    out = []
+    for k in range(0, len(coords), OM_BATCH):
+        chunk = coords[k:k + OM_BATCH]
+        params = {
+            "latitude":  ",".join(f"{la:.5f}" for la, _ in chunk),
+            "longitude": ",".join(f"{lo:.5f}" for _, lo in chunk),
+            "current": "temperature_2m",
+            "temperature_unit": "fahrenheit",
+            "models": OM_MODEL,
+            "timezone": "UTC",
         }
-    except Exception:
-        return None
+        for attempt in range(4):
+            try:
+                r = requests.get("https://api.open-meteo.com/v1/forecast",
+                                 params=params, timeout=60)
+                d = r.json()
+                if isinstance(d, dict):          # API-level error (esp. rate limit)
+                    print(f"  ! {d.get('reason', d)}")
+                    time.sleep(20)
+                    continue
+                for x in d:
+                    out.append({
+                        "lat": x["latitude"],
+                        "lon": x["longitude"],
+                        "elev": x.get("elevation"),
+                        "temp_f": x["current"]["temperature_2m"],
+                    })
+                break
+            except Exception as e:
+                print(f"  ! request failed ({e}), retrying...")
+                time.sleep(5)
+        time.sleep(1.5)   # stay under Open-Meteo's ~600 calls/min limit
+    return out
 
-# ---------- Fetch ----------
-print("\nFetching temps (Microclimates only)...")
-obs, total_sensors = {}, 0
-for idx, row in gdf.iterrows():
-    key = best_key(row[name_col])
-    o = fetch_mc(key) if key else None
-    if o:
-        obs[idx] = o
-        total_sensors += o["sensors"]
-        print(f"  {row[name_col]:<32} {o['temp_f']:>5.1f}°F  ({o['sensors']} sensors)")
-    else:
-        print(f"  {row[name_col]:<32}     —   (no data)")
-
-print(f"\nObserved {len(obs)}/{len(gdf)} neighborhoods, {total_sensors} sensors total")
-
-if len(obs) < MIN_OBSERVATIONS:
-    raise SystemExit(
-        f"\n✗ Only {len(obs)} neighborhoods returned data (need >= {MIN_OBSERVATIONS}).\n"
-        f"  The Microclimates API is degraded — refusing to overwrite {OUTPUT_JSON.name}.\n"
-        f"  Existing data was left untouched.")
-
-ok = gdf.loc[list(obs.keys())].copy()
-ok['temp_f'] = [obs[i]['temp_f'] for i in ok.index]
 
 # ---------- Square grid ----------
 sf_minx, sf_miny, sf_maxx, sf_maxy = gdf.total_bounds
@@ -125,9 +95,31 @@ ys = np.linspace(maxy, miny, GRID_SIZE)
 grid_x, grid_y = np.meshgrid(xs, ys)
 print(f"\nGrid: {GRID_SIZE}×{GRID_SIZE} (square, {side_km:.1f} km side)")
 
+# ---------- Sample Open-Meteo ----------
+sample_xs = np.linspace(minx, maxx, OM_SAMPLE_GRID)
+sample_ys = np.linspace(miny, maxy, OM_SAMPLE_GRID)
+coords = [(la, lo) for la in sample_ys for lo in sample_xs]
+spacing_m = side_km / max(1, OM_SAMPLE_GRID - 1) * 1000
+print(f"\nSampling Open-Meteo ({OM_MODEL}): {len(coords)} points "
+      f"(~{spacing_m:.0f} m spacing)...")
+
+samples = [s for s in fetch_openmeteo(coords) if s["temp_f"] is not None]
+print(f"  received {len(samples)}/{len(coords)} points")
+
+if len(samples) < MIN_SAMPLE_FRAC * len(coords):
+    raise SystemExit(
+        f"\n✗ Only {len(samples)}/{len(coords)} sample points returned data.\n"
+        f"  Open-Meteo may be rate-limited or down — refusing to overwrite "
+        f"{OUTPUT_JSON.name}.\n  Existing data was left untouched.")
+
+elevs = [s["elev"] for s in samples if s["elev"] is not None]
+if elevs:
+    print(f"  elevation range: {min(elevs):.0f}–{max(elevs):.0f} m")
+
 # ---------- Interpolate & mask ----------
-points = np.column_stack([ok.lon, ok.lat])
-values = ok.temp_f.values
+points = np.column_stack([[s["lon"] for s in samples],
+                          [s["lat"] for s in samples]])
+values = np.array([s["temp_f"] for s in samples])
 lin = griddata(points, values, (grid_x, grid_y), method='linear')
 nn  = griddata(points, values, (grid_x, grid_y), method='nearest')
 interp = np.where(np.isnan(lin), nn, lin)
@@ -139,13 +131,13 @@ print(f"Cells inside SF: {inside.sum()} / {GRID_SIZE*GRID_SIZE}")
 
 # ---------- Labels ----------
 labels = []
-for _, row in ok.iterrows():
+for _, row in gdf.iterrows():
     i = int(np.argmin(np.abs(xs - row['lon'])))
     j = int(np.argmin(np.abs(ys - row['lat'])))
-    if inside[j, i]:
+    if inside[j, i] and not np.isnan(interp[j, i]):
         labels.append({
             "r": j, "c": i, "name": row[name_col],
-            "temp": round(float(row['temp_f']), 1),
+            "temp": round(float(interp[j, i]), 1),
         })
 
 # ---------- Build JSON ----------
@@ -166,8 +158,12 @@ output = {
     "temps": temps_flat,
     "labels": labels,
     "sources": {
-        "neighborhoods": len(ok),
-        "sensors": total_sensors,
+        "provider": "Open-Meteo",
+        "model": OM_MODEL,
+        "samplePoints": len(samples),
+        "spacingM": round(spacing_m),
+        "elevationMin": round(min(elevs)) if elevs else None,
+        "elevationMax": round(max(elevs)) if elevs else None,
     },
 }
 with open(OUTPUT_JSON, 'w') as f:
@@ -177,4 +173,4 @@ valid = [t for t in temps_flat if t is not None]
 print(f"\n✅ Wrote {OUTPUT_JSON}")
 print(f"   {len(valid)} cells, {len(labels)} labels")
 print(f"   Range: {min(valid):.1f}°F – {max(valid):.1f}°F")
-print(f"   Microclimates: {len(ok)} neighborhoods, {total_sensors} sensors")
+print(f"   Source: Open-Meteo ({OM_MODEL}), {len(samples)} sample points")
